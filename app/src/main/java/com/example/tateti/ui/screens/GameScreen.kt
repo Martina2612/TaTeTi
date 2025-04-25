@@ -1,8 +1,8 @@
 package com.example.tateti.ui.screens
 
+import android.media.MediaPlayer
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
@@ -11,30 +11,66 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.tateti.ui.theme.TicTacToeTheme
-import kotlinx.coroutines.launch
+import com.example.tateti.R
+import com.example.tateti.logic.*
+import com.example.tateti.ui.components.GameBoard
+import com.example.tateti.ui.components.TimerProgressBar
+import com.example.tateti.ui.theme.*
+import com.tuapp.ui.components.FluorButton
 import kotlinx.coroutines.delay
-
+import kotlinx.coroutines.launch
+import kotlin.random.Random
 
 @Composable
 fun GameScreen(
     playerName: String,
     playerSymbol: String,
-    onNewGame: () -> Unit
+    onNewGame: () -> Unit,
+    onGameEnd: (String) -> Unit
 ) {
+    val context = LocalContext.current
     val aiSymbol = if (playerSymbol == "X") "O" else "X"
-    // Estado del tablero: Lista mutable de 9 celdas ("", "X" o "O")
     val board = remember { mutableStateListOf(*Array(9) { "" }) }
     var infoText by remember { mutableStateOf("$playerName, juegas con $playerSymbol") }
     var resultText by remember { mutableStateOf("") }
     var playerTurn by remember { mutableStateOf(true) }
     var moves by remember { mutableStateOf(0) }
-    // Timer (estático en este ejemplo)
-    var timerText by remember { mutableStateOf("0:05") }
+    var timer by remember { mutableStateOf(10) }
+    var winningCombo by remember { mutableStateOf<List<Int>?>(null) }
+    val coroutineScope = rememberCoroutineScope()
+
+    fun playSound(resId: Int) {
+        MediaPlayer.create(context, resId)?.apply {
+            start()
+            setOnCompletionListener { release() }
+        }
+    }
+
+    LaunchedEffect(resultText) {
+        if (resultText.isNotEmpty()) {
+            val sound = when {
+                resultText.contains(playerName, true) -> R.raw.win_sound
+                resultText.contains("máquina", true) -> R.raw.lose_sound
+                resultText.contains("empate", true) -> R.raw.draw_sound
+                else -> null
+            }
+            sound?.let { playSound(it) }
+        }
+    }
+
+    fun evaluarFin(turnoJugador: Boolean, mensaje: String) {
+        coroutineScope.launch {
+            delay(1000)
+            resultText = mensaje
+            onGameEnd(mensaje)
+        }
+    }
 
     fun resetGame() {
         for (i in board.indices) board[i] = ""
@@ -42,95 +78,88 @@ fun GameScreen(
         resultText = ""
         playerTurn = true
         moves = 0
-    }
-
-    fun checkWinner(symbol: String): Boolean {
-        val combos = listOf(
-            listOf(0, 1, 2), listOf(3, 4, 5), listOf(6, 7, 8),  // Filas
-            listOf(0, 3, 6), listOf(1, 4, 7), listOf(2, 5, 8),  // Columnas
-            listOf(0, 4, 8), listOf(2, 4, 6)                    // Diagonales
-        )
-        return combos.any { combo -> combo.all { board[it] == symbol } }
-    }
-
-    fun isDraw() = board.all { it != "" }
-
-    fun minimax(currentBoard: List<String>, isMaximizing: Boolean): Int {
-        if (checkWinner(aiSymbol)) return 1
-        if (checkWinner(playerSymbol)) return -1
-        if (currentBoard.all { it != "" }) return 0
-
-        return if (isMaximizing) {
-            var bestScore = Int.MIN_VALUE
-            for (i in currentBoard.indices) {
-                if (currentBoard[i] == "") {
-                    val newBoard = currentBoard.toMutableList()
-                    newBoard[i] = aiSymbol
-                    val score = minimax(newBoard, false)
-                    bestScore = maxOf(bestScore, score)
-                }
-            }
-            bestScore
-        } else {
-            var bestScore = Int.MAX_VALUE
-            for (i in currentBoard.indices) {
-                if (currentBoard[i] == "") {
-                    val newBoard = currentBoard.toMutableList()
-                    newBoard[i] = playerSymbol
-                    val score = minimax(newBoard, true)
-                    bestScore = minOf(bestScore, score)
-                }
-            }
-            bestScore
-        }
+        timer = 10
+        winningCombo = null
     }
 
     fun computerMove() {
-        var bestMove = -1
-        var bestScore = Int.MIN_VALUE
-        for (i in board.indices) {
-            if (board[i] == "") {
-                val newBoard = board.toList().toMutableList()
-                newBoard[i] = aiSymbol
-                val score = minimax(newBoard, false)
-                if (score > bestScore) {
-                    bestScore = score
-                    bestMove = i
-                }
+        val empty = board.withIndex().filter { it.value.isEmpty() }.map { it.index }
+        if (moves == 0) {
+            val pos = if (board[4].isEmpty()) 4 else 0
+            board[pos] = aiSymbol
+        } else if (Random.nextFloat() < 0.4f) {
+            board[empty.random()] = aiSymbol
+        } else {
+            val scores = empty.map { i ->
+                val temp = board.toMutableList().also { it[i] = aiSymbol }
+                i to minimax(temp, aiSymbol, playerSymbol, 0, false, Int.MIN_VALUE, Int.MAX_VALUE)
             }
+            val best = scores.maxByOrNull { it.second }?.first
+            if (best != null) board[best] = aiSymbol
         }
-        if (bestMove != -1) {
-            board[bestMove] = aiSymbol
-            moves++
-            if (checkWinner(aiSymbol)) {
-                resultText = "La máquina gana!"
-            } else if (isDraw()) {
-                resultText = "Empate!"
-            } else {
+
+        moves++
+        winningCombo = getWinningCombo(board, aiSymbol)
+        when {
+            winningCombo != null -> evaluarFin(false, "La máquina gana!")
+            isDraw(board)     -> evaluarFin(false, "Empate!")
+            else              -> {
                 playerTurn = true
                 infoText = "$playerName, tu turno"
+                timer = 10
             }
         }
     }
 
+    fun forceMove() {
+        val idx = board.indexOfFirst { it.isEmpty() }
+        if (idx >= 0) {
+            board[idx] = playerSymbol
+            moves++
+            winningCombo = getWinningCombo(board, playerSymbol)
+            when {
+                winningCombo != null -> evaluarFin(true, "$playerName gana!")
+                isDraw(board)        -> evaluarFin(true, "Empate!")
+                else -> {
+                    playerTurn = false
+                    infoText = "Turno de la máquina"
+                    coroutineScope.launch {
+                        delay(500)
+                        computerMove()
+                    }
+                }
+            }
+        }
+    }
 
-    val coroutineScope = rememberCoroutineScope()
+    LaunchedEffect(playerTurn, resultText) {
+        if (playerTurn && resultText.isEmpty()) {
+            timer = 10
+            while (timer > 0) {
+                delay(1000)
+                timer--
+                if (!playerTurn || resultText.isNotEmpty()) break
+            }
+            if (timer == 0 && playerTurn && resultText.isEmpty()) forceMove()
+        }
+    }
 
     fun onCellClick(index: Int) {
-        if (board[index] != "" || resultText.isNotEmpty() || !playerTurn) return
+        if (board[index].isNotEmpty() || !playerTurn) return
         board[index] = playerSymbol
+        playSound(R.raw.click_sound)
         moves++
-        if (checkWinner(playerSymbol)) {
-            resultText = "$playerName gana!"
-        } else if (isDraw()) {
-            resultText = "Empate!"
-        } else {
-            playerTurn = false
-            infoText = "Turno de la máquina"
-            // Lanzamos la corrutina en el scope
-            coroutineScope.launch {
-                delay(500)
-                computerMove()
+        winningCombo = getWinningCombo(board, playerSymbol)
+        when {
+            winningCombo != null -> evaluarFin(true, "Wow, $playerName gana!")
+            isDraw(board)        -> evaluarFin(true, "Empate!")
+            else -> {
+                playerTurn = false
+                infoText = "Turno de la máquina"
+                coroutineScope.launch {
+                    delay(500)
+                    computerMove()
+                }
             }
         }
     }
@@ -139,101 +168,67 @@ fun GameScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(
-                Brush.verticalGradient(
-                    colors = listOf(Color(0xFF6A1B9A), Color(0xFF4A148C))
-                )
-            ),
-        contentAlignment = Alignment.TopCenter
+                Brush.verticalGradient(listOf(MoradoOscuro, MoradoIntermedio, MoradoClaro))
+            )
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(16.dp)
+            modifier = Modifier.fillMaxSize()
         ) {
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(Modifier.height(50.dp))
             Text(
                 text = "Ta | Te | Ti",
-                fontSize = 64.sp,
-                fontWeight = FontWeight.Black,
-                color = Color(0xFFFFD700)
+                style = TextStyle(
+                    brush = Brush.verticalGradient(listOf(Color.Cyan, Color.Magenta, Color.Yellow)),
+                    fontFamily = BungeeSpiceFontFamily,
+                    fontWeight = FontWeight.Black,
+                    fontSize = 55.sp
+                )
             )
-            Spacer(modifier = Modifier.height(16.dp))
-            // Temporizador (estático)
-            Text(
-                text = timerText,
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.Black,
-                modifier = Modifier
-                    .background(Color.White, shape = RoundedCornerShape(8.dp))
-                    .padding(14.dp)
-            )
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(Modifier.height(24.dp))
+            TimerProgressBar(timeLeft = timer, maxTime = 10)
+            Spacer(Modifier.height(24.dp))
             Text(
                 text = infoText,
                 fontSize = 22.sp,
+                fontFamily = QuicksandFontFamily,
                 fontWeight = FontWeight.Bold,
                 color = Color.White
             )
-            Spacer(modifier = Modifier.height(12.dp))
-            // Tablero 3x3
-            Column(
-                modifier = Modifier
-                    .background(Color(0xFFD3D3D3), shape = RoundedCornerShape(16.dp))
-                    .padding(16.dp)
-            ) {
-                for (row in 0 until 3) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        for (col in 0 until 3) {
-                            val index = row * 3 + col
-                            Button(
-                                onClick = { onCellClick(index) },
-                                enabled = board[index] == "" && resultText.isEmpty(),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6200EE)),
-                                modifier = Modifier.size(80.dp)
-                            ) {
-                                Text(
-                                    text = board[index],
-                                    fontSize = 24.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White
-                                )
-                            }
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(6.dp))
-                }
-            }
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(Modifier.height(20.dp))
+
+            GameBoard(
+                board = board,
+                onCellClick = ::onCellClick,
+                winningCombo = winningCombo,
+                resultText = resultText
+            )
+
+            Spacer(Modifier.height(10.dp))
             if (resultText.isNotEmpty()) {
                 Text(
                     text = resultText,
                     fontSize = 22.sp,
+                    fontFamily = QuicksandFontFamily,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
                 )
             }
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(Modifier.height(15.dp))
+            FluorButton(
+                text = "NUEVO JUEGO",
+                onClick = ::resetGame
+            )
+            Spacer(Modifier.height(20.dp))
+
             Button(
-                onClick = { resetGame() },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFD740)),
-                modifier = Modifier.width(180.dp)
-            ) {
-                Text(
-                    text = "NUEVO JUEGO",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF663399)
-                )
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(
-                onClick = { onNewGame() },
-                colors = ButtonDefaults.buttonColors(containerColor = Color.Gray),
-                modifier = Modifier.width(180.dp)
+                onClick = onNewGame,
+                colors = ButtonDefaults.buttonColors(containerColor = Color.Gray)
             ) {
                 Text(
                     text = "Volver al menú",
                     fontSize = 16.sp,
+                    fontFamily = QuicksandFontFamily,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
                 )
@@ -247,9 +242,10 @@ fun GameScreen(
 fun GameScreenPreview() {
     TicTacToeTheme {
         GameScreen(
-            playerName = "Jugador",
+            playerName = "Claudio",
             playerSymbol = "X",
-            onNewGame = {}
+            onNewGame = {},
+            onGameEnd = {}
         )
     }
 }
